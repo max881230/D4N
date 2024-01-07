@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import "./VaultDelegate.sol";
+import "./Vault.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./sudoSwapInterface.sol";
 
 contract Central {
-    address admin;
+    address _admin;
     uint256 public proposalCount = 0;
     uint256 public vaultCount = 0;
     address public interactPool;
 
     mapping(uint256 => mapping(address => uint256)) public proposalBalances;
-    mapping(uint => ProposalInfo) public proposals;
+    mapping(uint256 => ProposalInfo) public proposals;
 
     struct ProposalInfo {
         // id of the current proposal
@@ -22,8 +22,10 @@ contract Central {
         address proposer;
         // address of the pool interacted on sudoswap
         address interactedPool;
+        // address of the target NFT
+        address interactedNft;
         // NFT id of which the vault is going to purchase
-        uint256 NFTId;
+        uint256 nftId;
         // floor price of the NFT the vault is going to purchase
         uint256 floorPrice;
         // lifetime of the vault
@@ -49,7 +51,7 @@ contract Central {
     // 可以拿掉 ERC20
     constructor(address admin_) {
         require(admin_ == msg.sender, "Invalid admin");
-        admin = admin_;
+        _admin = admin_;
     }
 
     // create a vaule with into parametet >
@@ -70,13 +72,13 @@ contract Central {
         // initialize parameters for buying NFTs
         address poolAddress = proposals[proposalId].interactedPool;
         uint256 vaultValue = proposals[proposalId].value;
-        uint256[] memory NFTIds = new uint[](1);
-        NFTIds[0] = proposals[proposalId].NFTId;
+        uint256[] memory nftIds = new uint[](1);
+        nftIds[0] = proposals[proposalId].nftId;
 
         // purchase NFTs through a sudoswap pool
         uint256 totalCost = ISudoSwapPool(poolAddress).swapTokenForSpecificNFTs{
             value: vaultValue
-        }(NFTIds, vaultValue, vaultAddress, false, vaultAddress);
+        }(nftIds, vaultValue, vaultAddress, false, vaultAddress);
 
         uint256 beforeBalance = address(this).balance;
         uint256 transferAmount = proposals[proposalId].value - totalCost;
@@ -101,7 +103,8 @@ contract Central {
     // including data: sudoswap NFT pool address / NFT id / vault lifetime / NFT floor price / pool id
     function createProposal(
         address interactedPool,
-        uint256 NFTId,
+        address interactedNft,
+        uint256 nftId,
         uint256 floorPrice,
         uint256 lifetime
     ) public returns (uint256) {
@@ -113,7 +116,8 @@ contract Central {
         newProposal.id = newProposalId;
         newProposal.proposer = msg.sender;
         newProposal.interactedPool = interactedPool;
-        newProposal.NFTId = NFTId;
+        newProposal.interactedNft = interactedNft;
+        newProposal.nftId = nftId;
         newProposal.floorPrice = floorPrice;
         newProposal.lifetime = lifetime;
         newProposal.vaultCreated = false;
@@ -130,13 +134,21 @@ contract Central {
         returns (
             uint256 id,
             address interactedPool,
-            uint256 NFTId,
+            address interactedNft,
+            uint256 nftId,
             uint256 floorPrice,
             uint256 lifetime
         )
     {
         ProposalInfo storage p = proposals[proposalId];
-        return (p.id, p.interactedPool, p.NFTId, p.floorPrice, p.lifetime);
+        return (
+            p.id,
+            p.interactedPool,
+            p.interactedNft,
+            p.nftId,
+            p.floorPrice,
+            p.lifetime
+        );
     }
 
     function getProposalStatus(
@@ -174,9 +186,6 @@ contract Central {
         return proposalBalances[proposalId][msg.sender];
     }
 
-    function updateFloorPrice(uint256 proposalId, uint256 floorPrice) public {}
-
-    // if the prosal hasn't
     function refund(uint256 proposalId) public checkProposalId(proposalId) {
         // if the vault has been created, user cannot apply for refund
         require(
@@ -198,5 +207,3 @@ contract Central {
 
     receive() external payable {}
 }
-
-// 改 balance
