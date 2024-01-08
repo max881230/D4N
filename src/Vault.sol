@@ -10,12 +10,16 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Central} from "./Central.sol";
 
 contract Vault is ERC20Votes {
+    bool public isRefundable = false;
+    bool public isVaultAcitve = true;
     uint256 public proposalCount = 0;
     uint256 public votingThreashold = 0;
 
     mapping(address => bool) mintCheck;
     mapping(address => uint256) balances;
-    mapping(uint => ProposalInfo) public proposals;
+    mapping(uint256 => ProposalInfo) public proposals;
+    mapping(uint256 => uint256) public proposalBlock;
+    mapping(uint256 => mapping(address => bool)) public proposalVoteCheck;
 
     uint256 constant proposalLifetime = 86_400 * 1;
     uint256 constant voteLifetime = 86_400 * 2;
@@ -26,14 +30,25 @@ contract Vault is ERC20Votes {
     Central.ProposalInfo public VaultInfo;
 
     struct ProposalInfo {
+        // id of the current proposal
         uint256 id;
+        // address of the proposer
         address proposer;
+        // purpose of the proposal
         string purpose;
+        // min income for selling the NFTs
+        uint256 minOutput;
+        // votes for the proposal
         uint256 forVotes;
+        // votes against the proposal
         uint256 againstVotes;
+        // start time of a proposal
         uint256 startTime;
+        // end time of a proposal
         uint256 endTime;
+        // status of whether the proposal is canceled or not
         bool canceled;
+        // status of whether the proposal is executed or not
         bool executed;
     }
 
@@ -45,6 +60,11 @@ contract Vault is ERC20Votes {
         _;
     }
 
+    modifier isActive() {
+        require(isVaultAcitve == true, "Vault has expired");
+        _;
+    }
+
     constructor(
         Central.ProposalInfo memory VaultInfo_,
         address centralAddr_
@@ -52,11 +72,40 @@ contract Vault is ERC20Votes {
         central = Central(payable(centralAddr_));
         VaultInfo = VaultInfo_;
         VaultInfo.lifetime = block.timestamp + VaultInfo.lifetime;
+        VaultInfo.ownNFTs = true;
         _mint(address(this), VaultInfo.value);
     }
 
-    function sell(uint256 proposalId, uint256 minOutput) internal {
-        // sell NFT procedure
+    function propose(
+        string memory purpose,
+        uint256 minOutput
+    ) public isActive returns (uint256) {
+        require(
+            getPastVotes(msg.sender, block.number - 1) > 0,
+            "Only investors who has vote amount can raise proposal"
+        );
+        proposalCount++;
+        uint256 newProposalId = proposalCount;
+
+        ProposalInfo storage newProposal = proposals[newProposalId];
+        proposalBlock[newProposalId] = block.number - 1;
+        newProposal.id = newProposalId;
+        newProposal.proposer = msg.sender;
+        newProposal.purpose = purpose;
+        newProposal.minOutput = minOutput;
+        newProposal.forVotes = 0;
+        newProposal.againstVotes = 0;
+        newProposal.startTime = block.timestamp + proposalLifetime;
+        newProposal.endTime = newProposal.startTime + voteLifetime;
+        newProposal.canceled = false;
+        newProposal.executed = false;
+
+        return newProposalId;
+    }
+
+    function _sell(uint256 proposalId) internal {
+        require(VaultInfo.ownNFTs == true, "There are no NFTs in this vault");
+        // sell NFT procedure start
         uint256[] memory nftIds = new uint[](1);
         nftIds[0] = VaultInfo.nftId;
         IERC721(VaultInfo.interactedNft).approve(
@@ -64,6 +113,12 @@ contract Vault is ERC20Votes {
             VaultInfo.nftId
         );
         uint256[] memory minExpectedOutputPerNumNFTs = new uint[](1);
+        uint256 minOutput;
+        if (block.timestamp > VaultInfo.lifetime && proposalId == 0) {
+            minOutput = 1 ether;
+        } else {
+            minOutput = proposals[proposalId].minOutput;
+        }
         minExpectedOutputPerNumNFTs[0] = minOutput;
 
         ISudoSwapPool.Order memory swapOrder;
@@ -89,65 +144,83 @@ contract Vault is ERC20Votes {
             recycleETH: false
         });
         ISudoSwapPool(veryFastRouter).swap(swapOrder);
-
         // end of selling NFT
 
-        proposals[proposalId].executed = true;
         VaultInfo.ownNFTs = false;
+        isRefundable = true;
     }
 
-    function propose(string memory purpose) public returns (uint256) {
+    function vote(
+        uint256 proposalId,
+        uint8 support
+    ) public checkProposalId(proposalId) isActive {
         require(
-            balances[msg.sender] > 0,
-            "Only the investor in this vault has the privilege to propose"
+            block.timestamp > proposals[proposalId].startTime,
+            "Proposal is under reviewing"
         );
-        proposalCount++;
-        uint256 newProposalId = proposalCount;
-
-        ProposalInfo storage newProposal = proposals[newProposalId];
-        newProposal.id = newProposalId;
-        newProposal.proposer = msg.sender;
-        newProposal.purpose = purpose;
-        newProposal.forVotes = 0;
-        newProposal.againstVotes = 0;
-        newProposal.startTime = block.timestamp + proposalLifetime;
-        newProposal.endTime = newProposal.startTime + voteLifetime;
-        newProposal.canceled = false;
-        newProposal.executed = false;
-
-        return newProposalId;
+        require(
+            block.timestamp < proposals[proposalId].endTime,
+            "Proposal is expired"
+        );
+        _castVote(proposalId, support);
     }
 
-    // function vote(uint256 proposalId) public checkProposalId(proposalId) {
-    //     require(
-    //         block.timestamp > proposals[proposalId].startTime,
-    //         "Proposal is under reviewing"
-    //     );
-    //     require(
-    //         block.timestamp < proposals[proposalId].endTime,
-    //         "Proposal is expired"
-    //     );
-    //     castVote();
-    // }
+    function _castVote(uint256 proposalId, uint8 support) internal {
+        // getPastVotes to get amount of votes
+        uint256 votes = getPastVotes(msg.sender, proposalBlock[proposalId]);
 
-    // function castVote(uint256 proposalId) internal {}
+        require(
+            proposalVoteCheck[proposalId][msg.sender] == false,
+            "You have already voted for this proposal"
+        );
+        proposalVoteCheck[proposalId][msg.sender] = true;
 
-    // function executeVote(uint256 proposalId) public {
-    //     // check whether the forVotes is greater than againstVotes and the total amount of result must greater than 50 %
-    //     if (proposals[proposalId].purpose == "sell") {
-    //         //
-    //         require(
-    //             proposals[proposalId].canceled == false,
-    //             "The proposal has been canceled"
-    //         );
-    //         sell(proposalId);
-    //     }
-    // }
+        // 1 is for, 0 is against
+        require(support == 0 || support == 1, "Invalid voting choice");
+        support == 1
+            ? proposals[proposalId].forVotes += votes
+            : proposals[proposalId].againstVotes += votes;
+    }
 
+    function executeVote(
+        uint256 proposalId
+    ) public checkProposalId(proposalId) isActive {
+        require(
+            block.timestamp > proposals[proposalId].endTime,
+            "Voting is still ongoing"
+        );
+        require(
+            proposals[proposalId].executed == false,
+            "Proposal has been executed"
+        );
+
+        uint256 totalVotes = getPastTotalSupply(proposalBlock[proposalId]);
+        // check whether the forVotes is greater than againstVotes and if it is, the total amount of for votes must greater than 50 % of total votes to pass
+        if (
+            proposals[proposalId].againstVotes * 2 > totalVotes ||
+            proposals[proposalId].forVotes * 2 < totalVotes
+        ) {
+            proposals[proposalId].canceled = true;
+        }
+
+        require(
+            proposals[proposalId].canceled == false,
+            "The proposal has been rejected"
+        );
+        if (
+            keccak256(abi.encodePacked(proposals[proposalId].purpose)) ==
+            keccak256(abi.encodePacked("sell"))
+        ) {
+            proposals[proposalId].executed = true;
+            _sell(proposalId);
+        }
+    }
+
+    // a must-do function if the investor wants to retrieve their assets back
     // turn balance into vault token for refund and voting
-    function mintVaultToken() public {
+    function mintVaultToken() public isActive {
         // read mapping balance value from central
-        (uint256 id, uint256 balance) = getBalance();
+        (, uint256 balance) = getBalance();
         require(balance > 0, "You don't have any assets in this vault");
         require(
             mintCheck[msg.sender] == false,
@@ -159,25 +232,35 @@ contract Vault is ERC20Votes {
     }
 
     // refund can only be executed when the vault has expired
-    // function refund() internal {
-    //     // assert all the investers in this vault has called mintVaultToken before, to update the balance record.
-    // }
+    function refund() public {
+        // assert all the investers in this vault has called mintVaultToken before, to update the balance record.
+        require(isRefundable == true, "There are still NFTs in this vault");
+        require(
+            balances[msg.sender] > 0,
+            "You don't have any assets in this vault"
+        );
 
-    // function closeVault() public {
-    //     require(
-    //         block.timestamp > VaultInfo.lifetime,
-    //         "Vault hasn't expired yet"
-    //     );
+        uint256 amount = balances[msg.sender];
+        balances[msg.sender] = 0;
+        payable(msg.sender).transfer(
+            (address(this).balance * amount) / VaultInfo.value
+        );
+    }
 
-    //     if (VaultInfo.ownNFTs == false) {
-    //         refund();
-    //     } else {
-    //         sell(??);
-    //         refund();
-    //     }
-    // }
+    function closeVault() public isActive {
+        require(
+            block.timestamp > VaultInfo.lifetime,
+            "Vault hasn't expired yet"
+        );
+        if (VaultInfo.ownNFTs == true) {
+            // vault still has Nfts in it, the vault will set a minOutput price automatically and force to sell Nfts.
+            _sell(0);
+            isRefundable = true;
+        }
+        isVaultAcitve = false;
+    }
 
-    function getBalance() public view returns (uint256, uint256) {
+    function getBalance() public view isActive returns (uint256, uint256) {
         return (
             VaultInfo.id,
             central.proposalBalances(VaultInfo.id, msg.sender)
@@ -190,21 +273,49 @@ contract Vault is ERC20Votes {
         public
         view
         checkProposalId(proposalId)
+        isActive
         returns (
             uint256 id,
             address proposer,
             string memory purpose,
+            uint256 minOutput,
             uint256 startTime,
             uint256 endTime
         )
     {
         ProposalInfo storage p = proposals[proposalId];
-        return (p.id, p.proposer, p.purpose, p.startTime, p.endTime);
+        return (
+            p.id,
+            p.proposer,
+            p.purpose,
+            p.minOutput,
+            p.startTime,
+            p.endTime
+        );
+    }
+
+    function getProposalStatus(
+        uint256 proposalId
+    )
+        public
+        view
+        checkProposalId(proposalId)
+        isActive
+        returns (
+            uint256 forVotes,
+            uint256 againstVotes,
+            bool canceled,
+            bool executed
+        )
+    {
+        ProposalInfo storage p = proposals[proposalId];
+        return (p.forVotes, p.againstVotes, p.canceled, p.executed);
     }
 
     function getVaultInfo()
         public
         view
+        isActive
         returns (
             uint256 id,
             address interactedPool,
@@ -217,7 +328,7 @@ contract Vault is ERC20Votes {
         return (v.id, v.interactedPool, v.nftId, v.value, v.lifetime);
     }
 
-    function getVaultRemainingTime() public view returns (uint256) {
+    function getVaultRemainingTime() public view isActive returns (uint256) {
         return VaultInfo.lifetime - block.timestamp;
     }
 
@@ -226,11 +337,3 @@ contract Vault is ERC20Votes {
     // function stake() public {}
     // function lend() public {}
 }
-
-// 先delegate (怎麼使用)
-// 提案 propose 只有 balance > 0 才可以提案
-// vote
-// 檢查 getPriorVote
-
-// executeVote
-// sell NFT
