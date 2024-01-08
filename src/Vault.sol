@@ -233,7 +233,8 @@ contract Vault is ERC20Votes {
 
     // refund can only be executed when the vault has expired
     function refund() public {
-        // assert all the investers in this vault has called mintVaultToken before, to update the balance record.
+        // assert all the investers in this vault has called mintVaultToken before,
+        // to update the balance record.
         require(isRefundable == true, "There are still NFTs in this vault");
         require(
             balances[msg.sender] > 0,
@@ -253,7 +254,8 @@ contract Vault is ERC20Votes {
             "Vault hasn't expired yet"
         );
         if (VaultInfo.ownNFTs == true) {
-            // vault still has Nfts in it, the vault will set a minOutput price automatically and force to sell Nfts.
+            // vault still has Nfts in it, the vault will set a minOutput price automatically
+            // and force to sell Nfts.
             _sell(0);
             isRefundable = true;
         }
