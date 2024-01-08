@@ -48,14 +48,12 @@ contract Central {
         _;
     }
 
-    // 可以拿掉 ERC20
     constructor(address admin_) {
         require(admin_ == msg.sender, "Invalid admin");
         _admin = admin_;
     }
 
-    // create a vaule with into parametet >
-    function createVault(
+    function _createVault(
         uint256 proposalId
     ) internal checkProposalId(proposalId) returns (address) {
         require(
@@ -95,12 +93,10 @@ contract Central {
 
         // updata vault info
         proposals[proposalId].ownNFTs = true;
-
         return address(vault);
     }
 
     // create a proposal for a specific NFT
-    // including data: sudoswap NFT pool address / NFT id / vault lifetime / NFT floor price / pool id
     function createProposal(
         address interactedPool,
         address interactedNft,
@@ -167,13 +163,12 @@ contract Central {
         address vaultAddr;
 
         proposalBalances[proposalId][msg.sender] += amount;
-        // proposals[proposalId].balance[msg.sender] += amount;
         proposals[proposalId].value += amount;
 
         // if the vaule of specific vault reach the target price, the vault would be created.
         uint256 targetPrice = (proposals[proposalId].floorPrice * 15) / 10;
         if (proposals[proposalId].value >= targetPrice) {
-            vaultAddr = createVault(proposalId);
+            vaultAddr = _createVault(proposalId);
         }
         return
             proposals[proposalId].value >= targetPrice ? vaultAddr : address(0);
@@ -182,7 +177,6 @@ contract Central {
     function getBalanceCheck(
         uint256 proposalId
     ) public view checkProposalId(proposalId) returns (uint256 balance) {
-        // return proposals[proposalId].balance[msg.sender];
         return proposalBalances[proposalId][msg.sender];
     }
 
@@ -193,13 +187,9 @@ contract Central {
             "Vault has been created"
         );
         require(
-            // proposals[proposalId].balance[msg.sender] >= 0,
             proposalBalances[proposalId][msg.sender] >= 0,
             "Iusufficient balance"
         );
-
-        // uint256 amount = proposals[proposalId].balance[msg.sender];
-        // proposals[proposalId].balance[msg.sender] = 0;
         uint256 amount = proposalBalances[proposalId][msg.sender];
         proposalBalances[proposalId][msg.sender] = 0;
         payable(msg.sender).transfer(amount);
