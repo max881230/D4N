@@ -16,9 +16,12 @@ contract testFinal is Test {
     uint256 mainnetFork;
     address admin = makeAddr("admin");
     address user1 = payable(makeAddr("user1"));
-    address user2 = makeAddr("user2");
+    address user2 = payable(makeAddr("user2"));
+    address user3 = payable(makeAddr("user3"));
+
     address BAYCPool = 0xCed43cC307C3d5453386Ce8b06fa14fcB6457fd4;
     address BAYC = 0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D;
+
     address veryFastRouter = 0x090C236B62317db226e6ae6CD4c0Fd25b7028b65;
     address vault1Addr;
     address vault2Addr;
@@ -34,7 +37,11 @@ contract testFinal is Test {
         vm.startPrank(admin);
 
         central = new Central(admin);
-        deal(user1, 1000 ether);
+
+        deal(admin, 1000 ether);
+        deal(user1, 15 ether);
+        deal(user2, 15 ether);
+        deal(user3, 15 ether);
 
         vm.stopPrank();
     }
@@ -56,8 +63,8 @@ contract testFinal is Test {
     function testDeposit() public {
         testCreateProposal();
         vm.startPrank(user1);
-        central.deposit{value: 30 ether}(1);
-        assertEq(30 ether, central.getBalanceCheck(1));
+        central.deposit{value: 15 ether}(1);
+        assertEq(15 ether, central.getBalanceCheck(1));
         vm.stopPrank();
     }
 
@@ -65,25 +72,20 @@ contract testFinal is Test {
         testDeposit();
         vm.startPrank(user1);
         central.refund(1);
-        assertEq(user1.balance, 1000 ether);
+        assertEq(user1.balance, 15 ether);
         vm.stopPrank();
     }
 
     function testCreateVaultAndBuyNft() public {
         testDeposit();
-        vm.startPrank(user1);
-        vault1Addr = central.deposit{value: 20 ether}(1);
+        vm.prank(user2);
+        central.deposit{value: 15 ether}(1);
+        vm.startPrank(user3);
+        vault1Addr = central.deposit{value: 15 ether}(1);
         assertEq(true, central.getProposalStatus(1));
         // console2.log(vault1Addr.balance);
 
-        (
-            uint256 id,
-            address interactedPool,
-            address interactedNft,
-            uint256 nftId,
-            uint256 floorPrice,
-            uint256 lifetime
-        ) = central.getProposalInfo(1);
+        (, , address interactedNft, , , ) = central.getProposalInfo(1);
 
         assertEq(IERC721(interactedNft).ownerOf(2483), vault1Addr);
         vm.stopPrank();
@@ -93,25 +95,91 @@ contract testFinal is Test {
         testCreateVaultAndBuyNft();
         vm.startPrank(user1);
         vault1 = Vault(payable(vault1Addr));
-        (uint256 id, uint256 balance) = vault1.getBalance();
-        assertEq(balance, 50 ether);
+        (, uint256 balance) = vault1.getBalance();
+        assertEq(balance, 15 ether);
         vm.stopPrank();
     }
 
     function testMintVaultToken() public {
         testCreateVaultAndBuyNft();
-        vm.startPrank(user1);
         vault1 = Vault(payable(vault1Addr));
+        vm.prank(user1);
         vault1.mintVaultToken();
-        vm.stopPrank();
+        vm.prank(user2);
+        vault1.mintVaultToken();
+        vm.prank(user3);
+        vault1.mintVaultToken();
+        assertEq(vault1.balanceOf(user1), 15 ether);
+        assertEq(vault1.balanceOf(user2), 15 ether);
+        assertEq(vault1.balanceOf(user3), 15 ether);
+    }
+
+    function testDelegateVote() public {
+        testMintVaultToken();
+        vm.prank(user1);
+        vault1.delegate(user1);
+        vm.prank(user2);
+        vault1.delegate(user2);
+        vm.prank(user3);
+        vault1.delegate(user3);
+
+        assertEq(vault1.getVotes(user1), 15 ether);
+        assertEq(vault1.getVotes(user2), 15 ether);
+        assertEq(vault1.getVotes(user3), 15 ether);
     }
 
     function testCreateVaultProposal() public {
-        testMintVaultToken();
+        testDelegateVote();
+        vm.rollFork(18_532_609);
         vm.startPrank(user1);
         string memory purpose = "sell";
-        vault1 = Vault(payable(vault1Addr));
-        vault1.propose(purpose);
+        vault1.propose(purpose, 1 ether);
+        vm.stopPrank();
+    }
+
+    function testVoteProposal() public {
+        testCreateVaultProposal();
+        vm.prank(user1);
+        // proposal is under reviewing
+        vm.expectRevert();
+        vault1.vote(1, 1);
+
+        vm.warp(block.timestamp + 1 days + 1);
+        vm.startPrank(user1);
+        vault1.vote(1, 1);
+        // cannot vote for twice
+        vm.expectRevert();
+        vault1.vote(1, 1);
+        vm.stopPrank();
+
+        vm.prank(user2);
+        vault1.vote(1, 1);
+        vm.prank(user3);
+        vault1.vote(1, 0);
+
+        (uint256 forVotes, uint256 againstVotes, , ) = vault1.getProposalStatus(
+            1
+        );
+        assertEq(forVotes, 30 ether);
+        assertEq(againstVotes, 15 ether);
+    }
+
+    function testExecuteProposal() public {
+        testVoteProposal();
+        console2.log(address(vault1).balance);
+
+        vm.startPrank(user1);
+        // vote is still on-going
+        vm.expectRevert();
+        vault1.executeVote(1);
+
+        vm.warp(block.timestamp + 2 days);
+        vault1.executeVote(1);
+
+        console2.log(address(vault1).balance);
+        // proposal has been executed
+        vm.expectRevert();
+        vault1.executeVote(1);
         vm.stopPrank();
     }
 
@@ -128,31 +196,32 @@ contract testFinal is Test {
     }
 
     function testSudoSwapBuyNFT() public {
-        vm.startPrank(user1);
-        assertEq(user1.balance, 1000 ether);
+        vm.startPrank(admin);
+        assertEq(admin.balance, 1000 ether);
         uint256[] memory value = new uint[](1);
         value[0] = 2483;
 
         uint256 cost = ISudoSwapPool(BAYCPool).swapTokenForSpecificNFTs{
             value: 40 ether
-        }(value, 40 ether, user1, false, user1);
+        }(value, 40 ether, admin, false, admin);
 
-        assertEq(IERC721(BAYC).ownerOf(2483), user1);
+        assertEq(IERC721(BAYC).ownerOf(2483), admin);
 
-        console2.log(user1.balance);
-        console2.log(cost);
+        // console2.log(admin.balance);
+        // console2.log(cost);
         vm.stopPrank();
     }
 
     function testSudoSwapSellNFT() public {
         testSudoSwapBuyNFT();
-        vm.startPrank(user1);
+        vm.startPrank(admin);
+        // console2.log(admin.balance);
         uint256[] memory nftIds = new uint[](1);
         nftIds[0] = 2483;
 
         IERC721(BAYC).approve(veryFastRouter, 2483);
         uint256[] memory minExpectedOutputPerNumNFTs = new uint[](1);
-        minExpectedOutputPerNumNFTs[0] = 30 ether;
+        minExpectedOutputPerNumNFTs[0] = 25 ether;
 
         ISudoSwapPool.Order memory swapOrder;
         ISudoSwapPool.BuyOrderWithPartialFill[] memory buyOrders;
@@ -165,19 +234,19 @@ contract testFinal is Test {
         sellOrders[0].nftIds = nftIds;
         sellOrders[0].doPropertyCheck = false;
         sellOrders[0].propertyCheckParams = "0x";
-        sellOrders[0].expectedSpotPrice = 30 ether;
-        sellOrders[0].minExpectedOutput = 30 ether;
+        sellOrders[0].expectedSpotPrice = 25 ether;
+        sellOrders[0].minExpectedOutput = 25 ether;
         sellOrders[0].minExpectedOutputPerNumNFTs = minExpectedOutputPerNumNFTs;
 
         swapOrder = ISudoSwapPool.Order({
             buyOrders: buyOrders,
             sellOrders: sellOrders,
-            tokenRecipient: payable(user1),
-            nftRecipient: user1,
+            tokenRecipient: payable(admin),
+            nftRecipient: admin,
             recycleETH: false
         });
         ISudoSwapPool(veryFastRouter).swap(swapOrder);
-
+        // console2.log(admin.balance);
         vm.stopPrank();
     }
 }
