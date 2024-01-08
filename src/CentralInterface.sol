@@ -30,8 +30,6 @@ interface ICentral {
         bool ownNFTs;
     }
 
-    function createVault(uint256 proposalId) external returns (address);
-
     function createProposal(
         address interactedPool,
         address interactedNft,
